@@ -1,0 +1,48 @@
+{
+  "name": "nextjs-rendering-patterns-demo",
+  "version": "1.0.0",
+  "description": "Next.js App Routerの3つのレンダリング戦略（CSR/SSR/RSC）を実装・比較するデモプロジェクト",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "type-check": "tsc --noEmit",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,css,md}\"",
+    "clean": "rm -rf .next out"
+  },
+  "dependencies": {
+    "next": "^15.0.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "typescript": "^5.3.3",
+    "eslint": "^8.56.0",
+    "eslint-config-next": "^15.0.3",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "prettier": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=18.17.0",
+    "npm": ">=9.0.0"
+  },
+  "keywords": [
+    "nextjs",
+    "react",
+    "server-components",
+    "ssr",
+    "csr",
+    "rsc",
+    "performance",
+    "app-router",
+    "typescript"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
