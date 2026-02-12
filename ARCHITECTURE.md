@@ -1,956 +1,607 @@
-# Performance Observatory - アーキテクチャ設計書
+# アーキテクチャ図（Mermaid版）
 
-## プロジェクトコンセプト
-**"Performance Observatory"** - 商品カタログ + ユーザーダッシュボードを3つのレンダリング戦略で実装し、設計判断を可視化
-
-設計目的：Next.js/React経験5年以上の設計力を証明するデモ
+このファイルには、Performance Observatoryプロジェクトの主要なアーキテクチャ図をMermaid形式で記載しています。
 
 ---
 
-## 1. 全体アーキテクチャ図
+## 目次
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Next.js App Router                    │
-├─────────────────────────────────────────────────────────┤
-│                                                           │
-│  ┌───────────────┐  ┌───────────────┐  ┌─────────────┐ │
-│  │  CSR Pattern  │  │  SSR Pattern  │  │ RSC Pattern │ │
-│  │  (Anti)       │  │  (Standard)   │  │ (Optimal)   │ │
-│  └───────┬───────┘  └───────┬───────┘  └──────┬──────┘ │
-│          │                  │                   │        │
-│          └──────────────────┴───────────────────┘        │
-│                          │                               │
-│                  ┌───────▼────────┐                      │
-│                  │  Shared Logic  │                      │
-│                  │  - Types       │                      │
-│                  │  - Validators  │                      │
-│                  │  - Utils       │                      │
-│                  └───────┬────────┘                      │
-│                          │                               │
-│          ┌───────────────┼───────────────┐              │
-│          │               │               │              │
-│    ┌─────▼─────┐  ┌─────▼─────┐  ┌─────▼─────┐        │
-│    │   Mock    │  │  Metrics  │  │  Feature  │        │
-│    │   API     │  │  Tracker  │  │  Flags    │        │
-│    └───────────┘  └───────────┘  └───────────┘        │
-│                                                           │
-└─────────────────────────────────────────────────────────┘
-```
+1. [全体アーキテクチャ](#1-全体アーキテクチャ)
+2. [レンダリングパターンの比較](#2-レンダリングパターンの比較)
+3. [データフロー図](#3-データフロー図)
+4. [パターン選択フローチャート](#4-パターン選択フローチャート)
+5. [スケールアップアーキテクチャ](#5-スケールアップアーキテクチャ)
+6. [キャッシュ戦略](#6-キャッシュ戦略)
+7. [エラーハンドリング階層](#7-エラーハンドリング階層)
 
 ---
 
-## 2. 各実装方式の詳細
+## 1. 全体アーキテクチャ
 
-### 🔴 CSR-Anti（意図的な失敗例）
+### システム全体構成
 
-**ファイル**: `app/(patterns)/csr-anti/page.tsx`
-
-```tsx
-'use client';
-
-export default function CSRAntiPage() {
-  const [products, setProducts] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  // ❌ アンチパターン: useEffect地獄
-  useEffect(() => {
-    fetch('/api/products')
-      .then(res => res.json())
-      .then(data => {
-        setProducts(data);
-        setLoading(false);
-      });
-  }, []);
-
-  // ❌ 問題点:
-  // 1. 初回レンダリング時にデータなし（SEO×）
-  // 2. ウォーターフォールリクエスト
-  // 3. ローディング状態管理の複雑化
-  // 4. エラーハンドリングなし
-  
-  return loading ? <Spinner /> : <ProductList data={products} />;
-}
+```mermaid
+graph TB
+    subgraph "Next.js App Router"
+        subgraph "Patterns Layer"
+            CSR[CSR Pattern<br/>❌ Anti-Pattern]
+            SSR[SSR Pattern<br/>✅ Standard]
+            RSC[RSC Pattern<br/>🚀 Optimal]
+        end
+        
+        subgraph "Shared Logic Layer"
+            Types[Types]
+            Validators[Validators]
+            Utils[Utils]
+        end
+        
+        subgraph "Infrastructure Layer"
+            MockAPI[Mock API]
+            Metrics[Metrics Tracker]
+            Features[Feature Flags]
+        end
+        
+        CSR --> Types
+        SSR --> Types
+        RSC --> Types
+        
+        Types --> MockAPI
+        Types --> Metrics
+        Types --> Features
+    end
+    
+    Client[Browser Client] --> CSR
+    Client --> SSR
+    Client --> RSC
+    
+    style CSR fill:#ff9999
+    style SSR fill:#99ccff
+    style RSC fill:#99ff99
 ```
 
-**測定指標:**
-- FCP (First Contentful Paint): 遅い (2000-3000ms)
-- LCP (Largest Contentful Paint): 遅い (3000-4000ms)
-- TTI (Time to Interactive): 非常に遅い (3500-5000ms)
-- Bundle Size: 大きい (~200KB)
+### コンポーネント階層
 
-**学習ポイント:**
-このパターンがなぜダメなのかを定量的に示すための実装。
-実際のメトリクスで証明することが重要。
-
----
-
-### 🟡 SSR-Standard（標準的な実装）
-
-**ファイル**: `app/(patterns)/ssr-standard/page.tsx`
-
-```tsx
-import { Suspense } from 'react';
-
-async function getProducts() {
-  // ✅ サーバーサイドでデータ取得
-  const res = await fetch('http://localhost:3000/api/products', {
-    cache: 'no-store' // 常に最新データ
-  });
-  
-  if (!res.ok) {
-    throw new Error('Failed to fetch products');
-  }
-  
-  return res.json();
-}
-
-export default async function SSRStandardPage() {
-  const products = await getProducts();
-  
-  // ✅ 改善点:
-  // 1. SEO対応（HTML内にデータ含まれる）
-  // 2. 初回表示が速い
-  // 3. サーバーで認証チェック可能
-  
-  // ⚠️ トレードオフ:
-  // - リクエスト毎にサーバー処理
-  // - TTFB (Time to First Byte)が増加
-  // - サーバー負荷が高い
-  
-  return (
-    <div>
-      <h1>SSR Standard Implementation</h1>
-      <ProductList data={products} />
-    </div>
-  );
-}
+```mermaid
+graph LR
+    subgraph "App Directory"
+        Layout[layout.tsx<br/>Root Layout]
+        Page[page.tsx<br/>Home]
+        Patterns[/patterns/<br/>Route Group]
+    end
+    
+    subgraph "Pattern Implementations"
+        CSRPage[csr-anti/page.tsx]
+        SSRPage[ssr-standard/page.tsx]
+        RSCPage[rsc-optimal/page.tsx]
+    end
+    
+    subgraph "Components"
+        ServerComp[Server Components]
+        ClientComp[Client Components<br/>'use client']
+        HybridComp[Hybrid Components]
+    end
+    
+    Layout --> Page
+    Layout --> Patterns
+    Patterns --> CSRPage
+    Patterns --> SSRPage
+    Patterns --> RSCPage
+    
+    CSRPage --> ClientComp
+    SSRPage --> ServerComp
+    SSRPage --> ClientComp
+    RSCPage --> ServerComp
+    RSCPage --> HybridComp
+    
+    style CSRPage fill:#ff9999
+    style SSRPage fill:#99ccff
+    style RSCPage fill:#99ff99
 ```
 
-**測定指標:**
-- FCP: 中程度 (1000-1500ms、サーバー処理時間に依存)
-- LCP: 速い (1500-2000ms)
-- TTFB: やや遅い (500-800ms)
-- SEO: 完全対応 ✅
-- Bundle Size: 中程度 (~150KB)
-
-**適用シーン:**
-- ユーザーダッシュボード
-- 認証が必要なページ
-- リアルタイム性が重要なデータ
-
 ---
 
-### 🟢 RSC-Optimal（最適化実装）
+## 2. レンダリングパターンの比較
 
-**ファイル**: `app/(patterns)/rsc-optimal/page.tsx`
+### リクエストフロー比較
 
-```tsx
-import { Suspense } from 'react';
-import ProductList from '@/components/patterns/server/ProductListRSC';
-import RecommendationsRSC from '@/components/patterns/server/RecommendationsRSC';
-import InteractiveFilters from '@/components/patterns/client/InteractiveFilters';
-
-async function getProducts() {
-  const res = await fetch('http://localhost:3000/api/products', {
-    next: { 
-      revalidate: 60, // ISR: 60秒キャッシュ
-      tags: ['products'] // タグベース再検証
-    }
-  });
-  
-  if (!res.ok) throw new Error('Failed to fetch');
-  return res.json();
-}
-
-async function getRecommendations() {
-  const res = await fetch('http://localhost:3000/api/recommendations', {
-    next: { revalidate: 300 } // 5分キャッシュ
-  });
-  
-  if (!res.ok) throw new Error('Failed to fetch');
-  return res.json();
-}
-
-export default async function RSCOptimalPage() {
-  // 🚀 並列データフェッチ（ウォーターフォール回避）
-  const productsPromise = getProducts();
-  const recommendationsPromise = getRecommendations();
-  
-  return (
-    <div>
-      <h1>RSC Optimal Implementation</h1>
-      
-      {/* ✅ Streaming SSR: 各セクション独立してレンダリング */}
-      <Suspense fallback={<ProductListSkeleton />}>
-        <ProductList promise={productsPromise} />
-      </Suspense>
-      
-      <Suspense fallback={<RecommendationsSkeleton />}>
-        <RecommendationsRSC promise={recommendationsPromise} />
-      </Suspense>
-      
-      {/* ✅ クライアントコンポーネントは必要な部分のみ */}
-      <InteractiveFilters />
-    </div>
-  );
-}
-
-// ✅ 静的生成の活用（Build時に生成）
-export async function generateStaticParams() {
-  const products = await getProducts();
-  
-  // 人気上位20商品を事前生成
-  return products.slice(0, 20).map(p => ({ 
-    id: p.id.toString() 
-  }));
-}
-
-// ✅ メタデータ生成
-export async function generateMetadata({ params }: { params: { id: string } }) {
-  const product = await getProduct(params.id);
-  
-  return {
-    title: `${product.name} - Performance Observatory`,
-    description: product.description,
-  };
-}
+```mermaid
+sequenceDiagram
+    participant Browser
+    participant NextServer as Next.js Server
+    participant API
+    
+    Note over Browser,API: ❌ CSR Pattern (遅い)
+    Browser->>NextServer: GET /csr-anti
+    NextServer-->>Browser: HTML (空のShell)
+    Browser->>Browser: JavaScript実行
+    Browser->>API: GET /api/products
+    API-->>Browser: JSON Data
+    Browser->>Browser: レンダリング
+    Note right of Browser: Total: ~2500ms
+    
+    Note over Browser,API: ✅ SSR Pattern (標準)
+    Browser->>NextServer: GET /ssr-standard
+    NextServer->>API: GET /api/products
+    API-->>NextServer: JSON Data
+    NextServer->>NextServer: HTML生成
+    NextServer-->>Browser: 完全なHTML
+    Browser->>Browser: Hydration
+    Note right of Browser: Total: ~1200ms
+    
+    Note over Browser,API: 🚀 RSC Pattern (最速)
+    Browser->>NextServer: GET /rsc-optimal
+    NextServer->>API: GET /api/products (cached)
+    API-->>NextServer: JSON Data
+    NextServer->>NextServer: Streaming SSR
+    NextServer-->>Browser: HTML (部分的)
+    Browser->>Browser: Partial Hydration
+    Note right of Browser: Total: ~400ms
 ```
 
-**測定指標:**
-- FCP: 非常に速い (300-500ms、ストリーミング)
-- LCP: 速い (800-1200ms)
-- TTFB: 非常に速い (50-200ms、キャッシュ活用時)
-- SEO: 完全対応 ✅
-- Bundle Size: 最小 (~100KB)
-- JavaScript実行時間: 短い
+### パフォーマンス比較
 
-**技術的優位性:**
-1. **並列データフェッチ**: ウォーターフォールリクエスト回避
-2. **Streaming SSR**: 段階的なコンテンツ表示
-3. **Selective Hydration**: 必要な部分のみクライアント化
-4. **ISR**: 静的生成の速度 + 動的データの鮮度
-5. **タグベース再検証**: 細かいキャッシュ制御
+```mermaid
+graph LR
+    subgraph "CSR Anti-Pattern"
+        CSR_FCP[FCP: 2800ms]
+        CSR_LCP[LCP: 3500ms]
+        CSR_TTI[TTI: 4200ms]
+        CSR_Bundle[Bundle: 210KB]
+    end
+    
+    subgraph "SSR Standard"
+        SSR_FCP[FCP: 1200ms]
+        SSR_LCP[LCP: 1800ms]
+        SSR_TTI[TTI: 2500ms]
+        SSR_Bundle[Bundle: 155KB]
+    end
+    
+    subgraph "RSC Optimal"
+        RSC_FCP[FCP: 400ms]
+        RSC_LCP[LCP: 1000ms]
+        RSC_TTI[TTI: 1500ms]
+        RSC_Bundle[Bundle: 98KB]
+    end
+    
+    style CSR_FCP fill:#ff6666
+    style CSR_LCP fill:#ff6666
+    style CSR_TTI fill:#ff6666
+    style CSR_Bundle fill:#ff6666
+    
+    style SSR_FCP fill:#ffcc66
+    style SSR_LCP fill:#ffcc66
+    style SSR_TTI fill:#ffcc66
+    style SSR_Bundle fill:#ffcc66
+    
+    style RSC_FCP fill:#66ff66
+    style RSC_LCP fill:#66ff66
+    style RSC_TTI fill:#66ff66
+    style RSC_Bundle fill:#66ff66
+```
 
 ---
 
-## 3. トレードオフ分析表
+## 3. データフロー図
 
-| 項目 | CSR-Anti | SSR-Standard | RSC-Optimal |
-|------|----------|--------------|-------------|
-| **初回表示速度** | ❌ 遅い（JS実行待ち） | ✅ 速い | 🚀 非常に速い |
-| **SEO** | ❌ 困難 | ✅ 完全対応 | ✅ 完全対応 |
-| **サーバー負荷** | ✅ 低い | ⚠️ リクエスト毎 | ✅ キャッシュで低減 |
-| **インタラクティブ性** | ✅ 高い | ⚠️ Hydration後 | ✅ 部分的に高い |
-| **Bundle Size** | ❌ 大きい (200KB) | ⚠️ 中程度 (150KB) | 🚀 最小 (100KB) |
-| **開発体験** | ⚠️ 状態管理複雑 | ✅ シンプル | 🚀 非常にシンプル |
-| **リアルタイム性** | ✅ 高い | ⚠️ 低い | ⚠️ ISR間隔依存 |
-| **認証データ扱い** | ❌ クライアント露出 | ✅ サーバーで保護 | 🚀 完全保護 |
-| **エラーハンドリング** | ❌ 複雑 | ✅ 標準 | 🚀 境界で分離 |
-| **キャッシュ制御** | ❌ 困難 | ⚠️ CDNレベル | 🚀 細かく制御可能 |
+### CSR パターンのデータフロー
+
+```mermaid
+flowchart TD
+    Start[ブラウザリクエスト] --> HTML[空のHTMLシェル受信]
+    HTML --> JS[JavaScriptダウンロード]
+    JS --> Execute[JavaScript実行]
+    Execute --> Mount[Reactマウント]
+    Mount --> Effect[useEffect実行]
+    Effect --> Fetch1[API呼び出し 1]
+    Fetch1 --> Wait1[データ待機...]
+    Wait1 --> Fetch2[API呼び出し 2]
+    Fetch2 --> Wait2[データ待機...]
+    Wait2 --> Render[コンテンツレンダリング]
+    Render --> Display[表示完了]
+    
+    style Start fill:#e1f5ff
+    style Display fill:#c8e6c9
+    style Wait1 fill:#ffcccc
+    style Wait2 fill:#ffcccc
+```
+
+### SSR パターンのデータフロー
+
+```mermaid
+flowchart TD
+    Start[ブラウザリクエスト] --> Server[サーバー受信]
+    Server --> Fetch[サーバーでAPI呼び出し]
+    Fetch --> Wait[データ待機]
+    Wait --> Generate[HTML生成]
+    Generate --> Send[HTMLを送信]
+    Send --> Browser[ブラウザで受信]
+    Browser --> Display[即座に表示]
+    Display --> Hydrate[Hydration]
+    Hydrate --> Interactive[インタラクティブ化]
+    
+    style Start fill:#e1f5ff
+    style Interactive fill:#c8e6c9
+    style Wait fill:#fff9c4
+```
+
+### RSC パターンのデータフロー（最適）
+
+```mermaid
+flowchart TD
+    Start[ブラウザリクエスト] --> Server[サーバー受信]
+    Server --> CheckCache{キャッシュ確認}
+    CheckCache -->|Hit| UseCached[キャッシュ使用]
+    CheckCache -->|Miss| FetchData[データ取得]
+    
+    FetchData --> Parallel[並列データフェッチ]
+    Parallel --> Fetch1[Products API]
+    Parallel --> Fetch2[Recommendations API]
+    
+    Fetch1 --> Merge[データ統合]
+    Fetch2 --> Merge
+    UseCached --> Generate
+    Merge --> Generate[HTML生成]
+    
+    Generate --> Stream[Streaming SSR]
+    Stream --> Send1[部分HTML送信 1]
+    Stream --> Send2[部分HTML送信 2]
+    Stream --> Send3[部分HTML送信 3]
+    
+    Send1 --> Display1[段階的表示 1]
+    Send2 --> Display2[段階的表示 2]
+    Send3 --> Display3[段階的表示 3]
+    
+    Display3 --> Hydrate[部分的Hydration]
+    Hydrate --> Interactive[インタラクティブ化]
+    
+    style Start fill:#e1f5ff
+    style Interactive fill:#c8e6c9
+    style UseCached fill:#c8e6c9
+    style Parallel fill:#c8e6c9
+```
 
 ---
 
-## 4. 想定スケール増加時の課題と対策
+## 4. パターン選択フローチャート
+
+```mermaid
+flowchart TD
+    Start{データ取得が<br/>必要か?}
+    
+    Start -->|No| Static[静的ページ<br/>通常のReactコンポーネント]
+    Start -->|Yes| SEO{SEOが<br/>重要か?}
+    
+    SEO -->|No| CSR[CSR<br/>Client-Side Rendering]
+    CSR --> CSRNote[例: 管理画面<br/>ダッシュボード<br/>認証後のページ]
+    
+    SEO -->|Yes| Freshness{データの<br/>鮮度要件は?}
+    
+    Freshness -->|リアルタイム必須| SSRReal[SSR<br/>cache: 'no-store']
+    SSRReal --> SSRNote[例: ユーザーダッシュボード<br/>ライブデータ<br/>個人情報]
+    
+    Freshness -->|数秒〜数分OK| RSCISR[RSC + ISR<br/>revalidate: 60-300]
+    RSCISR --> RSCISRNote[例: 商品一覧<br/>ブログ記事<br/>ニュース]
+    
+    Freshness -->|更新頻度低い| RSCStatic[RSC + 静的生成<br/>generateStaticParams]
+    RSCStatic --> RSCStaticNote[例: ドキュメント<br/>Aboutページ<br/>利用規約]
+    
+    SEO -->|Yes| Interactive{インタラクティブ性<br/>必要?}
+    
+    Interactive -->|高い| Hybrid[RSC + クライアント境界<br/>部分的にクライアント化]
+    Hybrid --> HybridNote[例: 検索フィルター<br/>カートボタン<br/>フォーム]
+    
+    Interactive -->|低い| PureRSC[完全RSC<br/>サーバーコンポーネントのみ]
+    PureRSC --> PureRSCNote[例: 記事詳細<br/>商品詳細<br/>静的コンテンツ]
+    
+    style CSR fill:#ff9999
+    style SSRReal fill:#99ccff
+    style RSCISR fill:#99ff99
+    style RSCStatic fill:#99ff99
+    style Hybrid fill:#99ff99
+    style PureRSC fill:#99ff99
+```
+
+### ユースケース別推奨パターン
+
+```mermaid
+graph LR
+    subgraph "Public Pages"
+        ProductList[商品一覧] -->|RSC + ISR| RSC1[🚀]
+        ProductDetail[商品詳細] -->|RSC + Static| RSC2[🚀]
+        Blog[ブログ記事] -->|RSC + Static| RSC3[🚀]
+        Search[検索結果] -->|RSC + Client| RSC4[🚀]
+    end
+    
+    subgraph "Authenticated Pages"
+        Dashboard[ダッシュボード] -->|SSR| SSR1[✅]
+        Profile[プロフィール] -->|SSR + Client| SSR2[✅]
+        Orders[注文履歴] -->|SSR| SSR3[✅]
+    end
+    
+    subgraph "Admin Pages"
+        AdminPanel[管理画面] -->|CSR許容| CSR1[⚠️]
+        Analytics[分析画面] -->|CSR許容| CSR2[⚠️]
+    end
+    
+    style RSC1 fill:#66ff66
+    style RSC2 fill:#66ff66
+    style RSC3 fill:#66ff66
+    style RSC4 fill:#66ff66
+    style SSR1 fill:#99ccff
+    style SSR2 fill:#99ccff
+    style SSR3 fill:#99ccff
+    style CSR1 fill:#ffcc99
+    style CSR2 fill:#ffcc99
+```
+
+---
+
+## 5. スケールアップアーキテクチャ
 
 ### フェーズ1: 初期（〜1万PV/日）
-**現状設計で対応可能**
-- モックAPIで十分
-- ISRで大半をカバー
-- 単一サーバーで運用可
 
-**構成:**
+```mermaid
+graph TB
+    Client[Browser Client] --> Vercel[Vercel<br/>Next.js App]
+    Vercel --> MockAPI[Mock API<br/>同一サーバー]
+    
+    style Vercel fill:#99ff99
 ```
-Vercel (Next.js) → Mock API (Same Server)
-```
-
----
 
 ### フェーズ2: 成長期（1万〜10万PV/日）
-**課題:**
-1. ISRキャッシュの肥大化
-2. データベースコネクション枯渇
-3. APIレスポンス遅延
 
-**対策:**
-
-#### 4.1 タグベース再検証の導入
-
-```typescript
-// lib/fetchers/server-fetcher.ts
-export async function getProduct(id: string) {
-  const res = await fetch(`${API_URL}/products/${id}`, {
-    next: { 
-      tags: [`product-${id}`, 'products', 'catalog'],
-      revalidate: 3600 
-    }
-  });
-  return res.json();
-}
-
-// app/api/revalidate/route.ts
-export async function POST(request: Request) {
-  const { type, id } = await request.json();
-  
-  switch(type) {
-    case 'product':
-      revalidateTag(`product-${id}`);
-      break;
-    case 'all-products':
-      revalidateTag('products');
-      break;
-    case 'catalog':
-      revalidateTag('catalog');
-      break;
-  }
-  
-  return Response.json({ revalidated: true });
-}
-```
-
-#### 4.2 データベースコネクションプーリング
-
-```typescript
-// lib/db/pool.ts
-import { Pool } from 'pg';
-
-const pool = new Pool({
-  max: 20,                    // 最大接続数
-  idleTimeoutMillis: 30000,   // アイドルタイムアウト
-  connectionTimeoutMillis: 2000,
-});
-
-export async function query(text: string, params?: any[]) {
-  const start = Date.now();
-  const client = await pool.connect();
-  
-  try {
-    const result = await client.query(text, params);
-    const duration = Date.now() - start;
+```mermaid
+graph TB
+    Client[Browser Client] --> Vercel[Vercel<br/>Next.js App]
     
-    // スロークエリログ
-    if (duration > 1000) {
-      console.warn('Slow query detected:', { text, duration });
-    }
+    Vercel --> Primary[Primary DB<br/>PostgreSQL]
+    Vercel --> Replica[Read Replica<br/>PostgreSQL]
     
-    return result;
-  } finally {
-    client.release();
-  }
-}
+    subgraph "Database Layer"
+        Primary -.->|Replication| Replica
+    end
+    
+    style Vercel fill:#99ff99
+    style Primary fill:#ff9999
+    style Replica fill:#99ccff
 ```
-
-#### 4.3 Read/Write分離
-
-```typescript
-// lib/db/connections.ts
-const PRIMARY_POOL = new Pool({
-  host: process.env.DB_PRIMARY_HOST,
-  // Write専用
-});
-
-const REPLICA_POOL = new Pool({
-  host: process.env.DB_REPLICA_HOST,
-  // Read専用（負荷分散）
-});
-
-export async function queryRead(text: string, params?: any[]) {
-  const client = await REPLICA_POOL.connect();
-  try {
-    return await client.query(text, params);
-  } finally {
-    client.release();
-  }
-}
-
-export async function queryWrite(text: string, params?: any[]) {
-  const client = await PRIMARY_POOL.connect();
-  try {
-    return await client.query(text, params);
-  } finally {
-    client.release();
-  }
-}
-```
-
----
 
 ### フェーズ3: 拡張期（10万〜100万PV/日）
-**課題:**
-1. エッジロケーション最適化
-2. 画像配信の高速化
-3. APIの地理的分散
 
-**対策:**
-
-#### 4.4 エッジキャッシング導入
-
-```typescript
-// middleware.ts
-import { NextRequest, NextResponse } from 'next/server';
-
-export const config = {
-  matcher: [
-    '/api/products/:path*',
-    '/((?!_next/static|_next/image|favicon.ico).*)',
-  ],
-};
-
-export function middleware(request: NextRequest) {
-  const response = NextResponse.next();
-  
-  // 静的コンテンツは長期キャッシュ
-  if (request.nextUrl.pathname.startsWith('/api/products')) {
-    response.headers.set(
-      'Cache-Control',
-      's-maxage=3600, stale-while-revalidate=86400'
-    );
-  }
-  
-  // A/Bテスト用のヘッダー
-  const variant = request.cookies.get('ab-test-variant')?.value || 'A';
-  response.headers.set('X-Variant', variant);
-  
-  return response;
-}
+```mermaid
+graph TB
+    Client[Browser Client] --> CDN[CDN<br/>CloudFlare]
+    
+    CDN --> Vercel[Vercel Edge<br/>Next.js App]
+    
+    Vercel --> Cache[Redis<br/>Cache Layer]
+    Cache --> Primary[Primary DB]
+    Cache --> Replica[Read Replica]
+    
+    Vercel --> S3[S3 + CloudFront<br/>Static Assets]
+    
+    Primary -.->|Replication| Replica
+    
+    style CDN fill:#9966ff
+    style Vercel fill:#99ff99
+    style Cache fill:#ff9966
+    style S3 fill:#6699ff
 ```
-
-#### 4.5 画像最適化戦略
-
-```typescript
-// next.config.js
-module.exports = {
-  images: {
-    domains: ['cdn.example.com'],
-    formats: ['image/avif', 'image/webp'],
-    deviceSizes: [640, 750, 828, 1080, 1200, 1920, 2048, 3840],
-    imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
-    minimumCacheTTL: 31536000, // 1年
-    
-    // 外部CDN使用時
-    loader: 'custom',
-    loaderFile: './lib/image-loader.ts',
-  },
-};
-
-// lib/image-loader.ts
-export default function cloudflareLoader({ src, width, quality }) {
-  const params = [`width=${width}`];
-  if (quality) params.push(`quality=${quality}`);
-  
-  return `https://cdn.example.com/${src}?${params.join('&')}`;
-}
-```
-
-#### 4.6 APIの分散化
-
-```typescript
-// lib/api/client.ts
-export class APIClient {
-  private baseUrl: string;
-  
-  constructor() {
-    // 地域ごとに最適なエンドポイント選択
-    this.baseUrl = this.selectOptimalEndpoint();
-  }
-  
-  private selectOptimalEndpoint(): string {
-    const region = process.env.VERCEL_REGION || 'us-east-1';
-    
-    const endpoints: Record<string, string> = {
-      'us-east-1': 'https://api-us-east.example.com',
-      'eu-west-1': 'https://api-eu-west.example.com',
-      'ap-northeast-1': 'https://api-ap-northeast.example.com',
-    };
-    
-    return endpoints[region] || endpoints['us-east-1'];
-  }
-  
-  async get<T>(path: string, options?: RequestInit): Promise<T> {
-    const url = `${this.baseUrl}${path}`;
-    const res = await fetch(url, {
-      ...options,
-      headers: {
-        'X-API-Key': process.env.INTERNAL_API_KEY!,
-        ...options?.headers,
-      },
-    });
-    
-    if (!res.ok) {
-      throw new APIError(res.status, await res.text());
-    }
-    
-    return res.json();
-  }
-}
-```
-
----
 
 ### フェーズ4: スケール期（100万PV/日〜）
-**アーキテクチャ変更が必要**
 
-```
-                     ┌──────────────┐
-                     │  CloudFlare  │
-                     │     CDN      │
-                     └──────┬───────┘
-                            │
-              ┌─────────────┴─────────────┐
-              │                           │
-      ┌───────▼────────┐         ┌───────▼────────┐
-      │   Vercel Edge  │         │   Static S3    │
-      │   (Next.js)    │         │  + CloudFront  │
-      └───────┬────────┘         └────────────────┘
-              │
-      ┌───────┴────────┐
-      │                │
-┌─────▼─────┐   ┌─────▼─────┐
-│ Primary DB│   │Read Replica│
-└───────────┘   └────────────┘
-      │
-┌─────▼──────────┐
-│  Redis Cluster │
-│   (Cache)      │
-└────────────────┘
-```
-
-**必要な技術導入:**
-1. **GraphQL** - Over-fetching削減
-2. **Redis** - セッション・キャッシュ管理
-3. **WebAssembly** - 重い計算処理
-4. **Service Worker** - オフライン対応
-
----
-
-## 5. 拡張余地
-
-### 5.1 機能拡張ロードマップ
-
-```typescript
-// config/features.ts
-export const features = {
-  // フェーズ1: 基本機能
-  enableMetrics: true,              // パフォーマンス計測
-  enableErrorTracking: true,        // エラートラッキング
-  
-  // フェーズ2: ユーザー体験向上
-  enableRealTimeUpdates: false,     // WebSocket統合
-  enableOfflineMode: false,         // PWA対応
-  enablePushNotifications: false,   // プッシュ通知
-  
-  // フェーズ3: パーソナライゼーション
-  enablePersonalization: false,     // ユーザー別最適化
-  enableABTesting: false,          // A/Bテスト
-  enableRecommendations: false,     // ML推薦エンジン
-  
-  // フェーズ4: グローバル展開
-  enableI18n: false,               // 多言語対応
-  enableGeoTargeting: false,       // 地域別最適化
-  
-  // 常時有効
-  enableA11y: true,                // アクセシビリティ
-  enableSecurity: true,            // セキュリティヘッダー
-} as const;
-
-// 使用例
-export default async function Page() {
-  return (
-    <>
-      <ProductList />
-      {features.enableRealTimeUpdates && <LivePriceUpdater />}
-      {features.enablePersonalization && <PersonalizedRecommendations />}
-    </>
-  );
-}
-```
-
-### 5.2 監視・観測性の進化
-
-```typescript
-// lib/metrics/observability.ts
-export class ObservabilityStack {
-  // フェーズ1: 基本ログ
-  static logBasic(message: string, data?: any) {
-    console.log(`[${new Date().toISOString()}]`, message, data);
-  }
-  
-  // フェーズ2: 構造化ログ
-  static logStructured(level: 'info' | 'warn' | 'error', data: LogData) {
-    const log = {
-      timestamp: Date.now(),
-      level,
-      environment: process.env.NODE_ENV,
-      ...data,
-    };
+```mermaid
+graph TB
+    Client[Browser Client] --> CDN[CDN<br/>CloudFlare]
     
-    if (process.env.NODE_ENV === 'production') {
-      // 外部サービスへ送信（例: Datadog, Sentry）
-      this.sendToLoggingService(log);
-    } else {
-      console.log(log);
-    }
-  }
-  
-  // フェーズ3: APM統合
-  static async trace<T>(
-    operationName: string,
-    fn: () => Promise<T>
-  ): Promise<T> {
-    const startTime = performance.now();
+    CDN --> Edge[Edge Runtime<br/>Multiple Regions]
     
-    try {
-      const result = await fn();
-      const duration = performance.now() - startTime;
-      
-      this.logMetric('operation.duration', duration, {
-        operation: operationName,
-        status: 'success',
-      });
-      
-      return result;
-    } catch (error) {
-      const duration = performance.now() - startTime;
-      
-      this.logMetric('operation.duration', duration, {
-        operation: operationName,
-        status: 'error',
-      });
-      
-      throw error;
-    }
-  }
-  
-  // フェーズ4: 分散トレーシング
-  static createSpan(name: string, parentSpanId?: string) {
-    // OpenTelemetry統合
-    // ...
-  }
-}
-```
-
-### 5.3 テスト戦略の進化
-
-```
-tests/
-├── unit/                         # フェーズ1
-│   ├── components/               # React Testing Library
-│   ├── lib/                      # Jest
-│   └── utils/
-│
-├── integration/                  # フェーズ2
-│   ├── api/                      # APIテスト
-│   └── database/                 # DBテスト
-│
-├── e2e/                          # フェーズ3
-│   ├── critical-paths/           # Playwright
-│   │   ├── checkout.spec.ts
-│   │   └── authentication.spec.ts
-│   └── visual-regression/        # Percy / Chromatic
-│       └── snapshots/
-│
-├── performance/                  # フェーズ4
-│   ├── lighthouse-ci/            # 自動化パフォーマンステスト
-│   ├── load-testing/             # k6 / Artillery
-│   └── benchmarks/
-│
-└── contract/                     # フェーズ5
-    └── api-contracts/            # Pact
-```
-
----
-
-## 6. 面接時の説明ポイント
-
-### 6.1 「なぜこの設計か？」を語る
-
-**例文:**
-```
-「CSR実装をあえて残している理由は、なぜそれがアンチパターンなのかを
-コード上で証明するためです。useEffectチェーンによるウォーターフォール
-リクエストが、実際のメトリクスでどれだけLCPを悪化させるかを測定可能に
-しています。
-
-面接官の方がコードを見れば、『この人は失敗パターンを理解している』と
-判断できる設計になっています。」
-```
-
-### 6.2 トレードオフの定量的説明
-
-**例文:**
-```
-「SSRとRSCの選択は『データの新鮮さ要件』と『サーバー負荷』のトレード
-オフです。
-
-商品一覧: ISRで60秒キャッシュ（価格変動が少ない）
-在庫数: クライアントフェッチ（リアルタイム性必須）
-ユーザー情報: SSR（毎回最新、認証必須）
-
-この判断基準は config/cache-strategies.ts に明文化してあります。」
-```
-
-### 6.3 スケーラビリティの具体的数値
-
-**例文:**
-```
-「現在の設計は1万PV/日を想定していますが:
-
-- 10万PV/日: Read Replica追加で対応可能（DB分離のみ）
-- 100万PV/日: CDN + Edge最適化が必要
-- 1000万PV/日: マイクロサービス化を検討
-
-各段階での投資対効果を docs/SCALING.md に記載しています。」
-```
-
-### 6.4 保守性への配慮
-
-**例文:**
-```
-「ディレクトリ構造で意図を表現しています:
-
-app/(patterns)/ ← 括弧でルートグループ化（URLに影響しない）
-  csr-anti/     ← 命名で『アンチパターン』と明示
-  ssr-standard/ ← 『標準実装』
-  rsc-optimal/  ← 『最適解』
-
-新しいメンバーが参加しても、3分でプロジェクト構造を理解できる
-設計を意識しています。」
-```
-
----
-
-## 7. パフォーマンスバジェット
-
-```typescript
-// config/performance-budgets.ts
-export const PERFORMANCE_BUDGETS = {
-  // Core Web Vitals
-  LCP: 2500,        // ms - Largest Contentful Paint
-  FID: 100,         // ms - First Input Delay
-  CLS: 0.1,         // score - Cumulative Layout Shift
-  
-  // その他指標
-  FCP: 1800,        // ms - First Contentful Paint
-  TTFB: 600,        // ms - Time to First Byte
-  TTI: 3500,        // ms - Time to Interactive
-  
-  // リソース
-  bundleSize: 150,  // KB - First Load JS
-  imageSize: 200,   // KB - 最大画像サイズ
-  fontSize: 50,     // KB - フォント合計
-  
-  // API
-  apiResponseTime: 500, // ms
-  
-  // 警告閾値（バジェットの80%）
-  warningThreshold: 0.8,
-} as const;
-
-// 使用例
-export function checkPerformanceBudget(metrics: WebVitals) {
-  const violations: string[] = [];
-  
-  if (metrics.LCP > PERFORMANCE_BUDGETS.LCP) {
-    violations.push(`LCP exceeded: ${metrics.LCP}ms`);
-  }
-  
-  if (metrics.FID > PERFORMANCE_BUDGETS.FID) {
-    violations.push(`FID exceeded: ${metrics.FID}ms`);
-  }
-  
-  if (violations.length > 0) {
-    logger.warn('Performance budget violations', { violations });
-  }
-  
-  return violations;
-}
-```
-
----
-
-## 8. エラーハンドリング戦略
-
-### 8.1 エラー境界の階層化
-
-```tsx
-// app/(patterns)/rsc-optimal/error.tsx
-'use client';
-
-import { useEffect } from 'react';
-import { logErrorToService } from '@/lib/metrics/logger';
-
-export default function Error({
-  error,
-  reset,
-}: {
-  error: Error & { digest?: string };
-  reset: () => void;
-}) {
-  useEffect(() => {
-    // エラー監視サービスへ送信
-    logErrorToService({
-      message: error.message,
-      stack: error.stack,
-      digest: error.digest,
-      timestamp: Date.now(),
-      url: window.location.href,
-    });
-  }, [error]);
-
-  return (
-    <div className="error-container">
-      <h2>データ取得に失敗しました</h2>
-      <p>
-        エラーID: <code>{error.digest}</code>
-      </p>
-      <button onClick={reset}>再試行</button>
-      <a href="/">ホームに戻る</a>
-    </div>
-  );
-}
-```
-
-### 8.2 段階的なフォールバック
-
-```tsx
-// components/patterns/hybrid/ProductCardWithFallback.tsx
-import { Suspense } from 'react';
-
-// レイヤー1: データ取得エラー
-async function ProductData({ id }: { id: string }) {
-  try {
-    const product = await getProduct(id);
-    return <ProductDetails product={product} />;
-  } catch (error) {
-    return <ProductErrorState error={error} />;
-  }
-}
-
-// レイヤー2: ローディング状態
-export default function ProductCardWithFallback({ id }: { id: string }) {
-  return (
-    <ErrorBoundary fallback={<ProductErrorCard />}>
-      <Suspense fallback={<ProductSkeleton />}>
-        <ProductData id={id} />
-      </Suspense>
-    </ErrorBoundary>
-  );
-}
-```
-
----
-
-## 9. セキュリティ考慮事項
-
-### 9.1 認証フロー
-
-```typescript
-// lib/auth/session.ts
-import { cookies } from 'next/headers';
-import { verify } from 'jsonwebtoken';
-
-export async function getSession() {
-  const cookieStore = cookies();
-  const token = cookieStore.get('session-token');
-  
-  if (!token) return null;
-  
-  try {
-    const payload = verify(token.value, process.env.JWT_SECRET!);
-    return payload as Session;
-  } catch {
-    return null;
-  }
-}
-
-// app/dashboard/layout.tsx
-export default async function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  const session = await getSession();
-  
-  if (!session) {
-    redirect('/login');
-  }
-  
-  return <div>{children}</div>;
-}
-```
-
-### 9.2 CSRFトークン
-
-```typescript
-// middleware.ts
-export function middleware(request: NextRequest) {
-  // POSTリクエストにCSRFチェック
-  if (request.method === 'POST') {
-    const csrfToken = request.headers.get('X-CSRF-Token');
-    const sessionToken = request.cookies.get('csrf-token')?.value;
+    Edge --> API[API Gateway<br/>Load Balancer]
     
-    if (!csrfToken || csrfToken !== sessionToken) {
-      return new Response('Invalid CSRF token', { status: 403 });
-    }
-  }
-  
-  return NextResponse.next();
-}
+    API --> Service1[Product Service]
+    API --> Service2[User Service]
+    API --> Service3[Recommendation Service]
+    
+    Service1 --> DB1[Product DB<br/>Primary + Replicas]
+    Service2 --> DB2[User DB<br/>Primary + Replicas]
+    Service3 --> DB3[Analytics DB]
+    
+    Service1 --> Redis[Redis Cluster<br/>Distributed Cache]
+    Service2 --> Redis
+    Service3 --> Redis
+    
+    style CDN fill:#9966ff
+    style Edge fill:#99ff99
+    style API fill:#ff9966
+    style Redis fill:#ff6666
 ```
 
 ---
 
-## 10. デプロイメント戦略
+## 6. キャッシュ戦略
 
-### 10.1 環境分離
+### キャッシュ階層
 
+```mermaid
+graph TD
+    Request[リクエスト] --> L1{CDN Cache}
+    
+    L1 -->|Hit| Return1[即座に返却<br/>TTFB: 50ms]
+    L1 -->|Miss| L2{Edge Cache}
+    
+    L2 -->|Hit| Return2[Edge返却<br/>TTFB: 100ms]
+    L2 -->|Miss| L3{ISR Cache}
+    
+    L3 -->|Hit| Return3[ISR返却<br/>TTFB: 150ms]
+    L3 -->|Miss| L4{Redis Cache}
+    
+    L4 -->|Hit| Return4[Redis返却<br/>TTFB: 250ms]
+    L4 -->|Miss| DB[Database Query<br/>TTFB: 400ms]
+    
+    DB --> Store[キャッシュに保存]
+    Store --> Return5[返却]
+    
+    style Return1 fill:#66ff66
+    style Return2 fill:#99ff66
+    style Return3 fill:#ccff66
+    style Return4 fill:#ffff66
+    style DB fill:#ff9966
 ```
-Development → Staging → Production
-    ↓            ↓          ↓
- feature    preview     main
- branches    branch     branch
-```
 
-### 10.2 段階的ロールアウト
+### キャッシュ戦略マトリックス
 
-```typescript
-// middleware.ts - カナリアデプロイメント
-export function middleware(request: NextRequest) {
-  const isCanaryUser = Math.random() < 0.1; // 10%のユーザー
-  
-  if (isCanaryUser) {
-    request.headers.set('X-Deployment-Version', 'canary');
-  }
-  
-  return NextResponse.next();
-}
+```mermaid
+quadrantChart
+    title キャッシュ戦略選択
+    x-axis 低頻度更新 --> 高頻度更新
+    y-axis 低重要度 --> 高重要度
+    quadrant-1 短期キャッシュ + タグ
+    quadrant-2 no-cache (SSR)
+    quadrant-3 長期キャッシュ (静的生成)
+    quadrant-4 中期キャッシュ (ISR)
+    
+    商品画像: [0.8, 0.3]
+    商品一覧: [0.6, 0.7]
+    商品詳細: [0.7, 0.6]
+    ユーザー情報: [0.3, 0.9]
+    在庫数: [0.2, 0.8]
+    おすすめ: [0.5, 0.5]
+    ブログ記事: [0.9, 0.6]
+    利用規約: [0.95, 0.4]
 ```
 
 ---
 
-## まとめ
+## 7. エラーハンドリング階層
 
-このアーキテクチャは以下を証明することを目的としています:
+### エラー境界の構造
 
-1. ✅ **技術選択の根拠を説明できる**
-   - なぜCSR/SSR/RSCを使い分けるか
-   - 各パターンのトレードオフを理解
+```mermaid
+graph TD
+    Root[Root Error Boundary<br/>app/error.tsx] --> Pattern[Pattern Error Boundary<br/>app/patterns/error.tsx]
+    
+    Pattern --> CSRError[CSR Error Boundary<br/>csr-anti/error.tsx]
+    Pattern --> SSRError[SSR Error Boundary<br/>ssr-standard/error.tsx]
+    Pattern --> RSCError[RSC Error Boundary<br/>rsc-optimal/error.tsx]
+    
+    RSCError --> ProductError[Product Error Boundary<br/>products/[id]/error.tsx]
+    
+    ProductError --> Component[Component Level<br/>try/catch]
+    
+    style Root fill:#ff6666
+    style Pattern fill:#ff9966
+    style RSCError fill:#ffcc66
+    style ProductError fill:#ffff66
+    style Component fill:#ccff66
+```
 
-2. ✅ **測定可能な形で設計判断を示せる**
-   - Web Vitalsでの定量評価
-   - パフォーマンスバジェット設定
+### エラーフロー
 
-3. ✅ **スケーラビリティを考慮できる**
-   - フェーズごとの課題と対策を提示
-   - 段階的な拡張パスを明示
+```mermaid
+sequenceDiagram
+    participant Component
+    participant ErrorBoundary
+    participant Logger
+    participant User
+    
+    Component->>Component: データ取得試行
+    Component->>Component: エラー発生
+    Component->>ErrorBoundary: エラーをスロー
+    
+    ErrorBoundary->>ErrorBoundary: エラーをキャッチ
+    ErrorBoundary->>Logger: ログ送信
+    Logger->>Logger: Sentry/Datadog
+    
+    ErrorBoundary->>User: Fallback UI表示
+    User->>ErrorBoundary: 再試行ボタンクリック
+    ErrorBoundary->>Component: リセット
+    Component->>Component: 再度データ取得
+```
 
-4. ✅ **保守性の高いコードを書ける**
-   - 自己説明的なディレクトリ構造
-   - 明確な責務分離
+---
 
-5. ✅ **実務を意識した設計ができる**
-   - エラーハンドリング
-   - セキュリティ配慮
-   - デプロイメント戦略
+## 8. デプロイメントフロー
 
-**想定レビュー時間**: 3分で構造理解 / 30分で詳細評価
+### CI/CDパイプライン
+
+```mermaid
+graph LR
+    subgraph "Development"
+        Dev[開発者] --> Commit[Git Commit]
+        Commit --> Push[Git Push]
+    end
+    
+    subgraph "CI Pipeline"
+        Push --> Trigger[GitHub Actions Trigger]
+        Trigger --> Lint[Lint Check]
+        Lint --> TypeCheck[Type Check]
+        TypeCheck --> Test[Unit Tests]
+        Test --> Build[Build]
+    end
+    
+    subgraph "Deployment"
+        Build --> Preview[Preview Deploy<br/>Vercel]
+        Preview --> Review[Code Review]
+        Review -->|Approve| Merge[Merge to Main]
+        Merge --> Production[Production Deploy]
+    end
+    
+    subgraph "Monitoring"
+        Production --> Metrics[Performance Metrics]
+        Production --> Errors[Error Tracking]
+        Production --> Logs[Logging]
+    end
+    
+    style Dev fill:#e1f5ff
+    style Production fill:#c8e6c9
+    style Metrics fill:#fff9c4
+```
+
+### カナリアデプロイメント
+
+```mermaid
+graph TD
+    Deploy[新バージョンデプロイ] --> Split{トラフィック分割}
+    
+    Split -->|90%| Stable[安定版<br/>v1.0]
+    Split -->|10%| Canary[カナリア版<br/>v1.1]
+    
+    Canary --> Monitor{メトリクス監視}
+    
+    Monitor -->|正常| Increase[カナリア比率増加]
+    Monitor -->|異常| Rollback[ロールバック]
+    
+    Increase --> Split2{トラフィック分割}
+    Split2 -->|50%| Stable
+    Split2 -->|50%| Canary
+    
+    Split2 --> Monitor2{メトリクス監視}
+    Monitor2 -->|正常| Complete[完全移行]
+    Monitor2 -->|異常| Rollback
+    
+    style Complete fill:#66ff66
+    style Rollback fill:#ff6666
+```
+
+---
+
+## 使用方法
+
+これらのMermaid図は、以下の場所で使用できます：
+
+1. **GitHub**: README.mdやドキュメントに直接埋め込み
+2. **Notion**: Mermaid対応のコードブロック
+3. **VS Code**: Mermaid Preview拡張機能
+4. **Mermaid Live Editor**: https://mermaid.live/
+
+### 埋め込み例
+
+````markdown
+```mermaid
+graph TD
+    Start[開始] --> Process[処理]
+    Process --> End[終了]
+```
+````
+
+これでアーキテクチャの可視化が完成です！
