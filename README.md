@@ -357,11 +357,9 @@ MIT License - 学習・ポートフォリオ目的で自由に使用可能
 
 ## 📮 連絡先
 
-**作成者**: [あなたの名前]
-**Portfolio**: [あなたのポートフォリオURL]
-**GitHub**: [@your-username](https://github.com/your-username)
-**X (Twitter)**: [@your-handle](https://twitter.com/your-handle)
-
+**作成者**: [hideki]
+**Portfolio**: [[あなたのポートフォリオURL](https://rancorder.vercel.app/portfolio/ja)]
+**GitHub**: [@rancorder](https://github.com/rancorder)
 ---
 
 ## 📊 プロジェクト統計
